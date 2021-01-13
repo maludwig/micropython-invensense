@@ -3,6 +3,8 @@ from mpu9250_registers import MPU9250Registers
 from ustruct import unpack
 from utime import sleep_ms, sleep_us
 
+AK8963_DATA_OK = 0x10
+
 WHOAMI_READ = 0x75 | 0x80
 SPI_READ = 0x80
 
@@ -51,7 +53,10 @@ class MPU9255:
         elif whoami == 0x73:
             print("Found MPU9255")
         else:
-            raise Exception("Unknown device: {}".format(whoami))
+            if whoami == 0x70:
+                print("Found MPU6500 (WHO_AM_I register was 0x70)")
+            else:
+                print("Unknown device: {} {}".format(whoami, hex(whoami)))
 
         # Enable measurements on all axes
         self.write_register(MPU9250Registers.PWR_MGMNT_2, MPU9250Registers.ENABLE_ALL_AXES)
@@ -63,6 +68,7 @@ class MPU9255:
         self.write_register(MPU9250Registers.ACCEL_CONFIG2, MPU9250Registers.ACCEL_DLPF_184)
         # 184Hz gyro DLPF
         self.write_register(MPU9250Registers.CONFIG, MPU9250Registers.GYRO_DLPF_184)
+        # self.write_register(MPU9250Registers.CONFIG, MPU9250Registers.CONFIG_FIFO_MODE_OVERWRITE | MPU9250Registers.GYRO_DLPF_184)
 
         # Set sample rate divider to 1 (1kHz sample rate)
         self.set_sample_rate_divider(1)
@@ -86,11 +92,11 @@ class MPU9255:
         sleep_ms(100)  # Long wait for AK8963 mode changes
         # Read magnetometer axis scale adjustment registers and compute magnetometer scale factors
         axis_scale_adj_buf = self.read_ak8963_registers(MPU9250Registers.AK8963_ASA, 3)
-        print(axis_scale_adj_buf)
+        # print(axis_scale_adj_buf)
         mag_x_adj = self.calc_mag_axis_scale_adj(axis_scale_adj_buf[0])
         mag_y_adj = self.calc_mag_axis_scale_adj(axis_scale_adj_buf[1])
         mag_z_adj = self.calc_mag_axis_scale_adj(axis_scale_adj_buf[2])
-        print("X: {}, Y: {}. Z: {}".format(mag_x_adj, mag_y_adj, mag_z_adj))
+        # print("X: {}, Y: {}. Z: {}".format(mag_x_adj, mag_y_adj, mag_z_adj))
         # # Power down magnetometer
         # self.write_ak8963_register(MPU9250Registers.AK8963_CNTL1, MPU9250Registers.AK8963_PWR_DOWN)
         # sleep_ms(100)  # Long wait for AK8963 mode changes
@@ -105,10 +111,9 @@ class MPU9255:
         print(list(mag_buf))
         mag_status = self.read_ak8963_register(MPU9250Registers.AK8963_ST1)
         while not (mag_status & (MPU9250Registers.AK8963_DATA_READY | MPU9250Registers.AK8963_DATA_OVERFLOW)):
-            print("Not ready")
             mag_status = self.read_ak8963_register(MPU9250Registers.AK8963_ST1)
             sleep_ms(1)
-        mag_buf = self.read_ak8963_sensors()
+        self.setup_ak8963_slave()
         print(list(mag_buf))
 
     def set_sample_rate_divider(self, div_num):
@@ -162,15 +167,24 @@ class MPU9255:
         reg_vals = self.read_registers(MPU9250Registers.EXT_SENS_DATA_00, count)
         return reg_vals
 
-    def read_ak8963_sensors(self):
+    def setup_ak8963_slave(self):
         self.write_register(MPU9250Registers.I2C_SLV0_ADDR, MPU9250Registers.AK8963_I2C_ADDR | MPU9250Registers.I2C_READ_FLAG)
         self.write_register(MPU9250Registers.I2C_SLV0_REG, MPU9250Registers.AK8963_HXL)
         # Read at sample rate, Swap bytes, write a register value, swap even indexed bytes with next byte, read 7 bytes
         self.write_register(MPU9250Registers.I2C_SLV0_CTRL, 0b11010111)
+
+    def read_ak8963_slave(self):
+        reg_vals = self.read_registers(MPU9250Registers.EXT_SENS_DATA_00, 7)
+        if reg_vals[6] == AK8963_DATA_OK:
+            mag_xyz = unpack(">hhh", reg_vals[:6])
+            return mag_xyz
+        else:
+            return None
+
+    def read_ak8963_sensors(self):
+        self.setup_ak8963_slave()
         sleep_ms(1)
-        reg_vals = self.read_registers(MPU9250Registers.EXT_SENS_DATA_00, MPU9250Registers.MAG_OUT_SIZE)
-        mag_xyz = unpack(">hhh", reg_vals[:6])
-        return mag_xyz
+        return self.read_ak8963_slave()
 
     def set_baudrate(self, baudrate):
         self.spi.init(baudrate=baudrate, polarity=0, phase=0)
@@ -181,6 +195,9 @@ class MPU9255:
     def enable_fifo(self):
         self.write_register(MPU9250Registers.USER_CTRL, MPU9250Registers.USER_CTRL_FIFO_EN | MPU9250Registers.I2C_MST_EN)
         self.write_register(MPU9250Registers.FIFO_EN, MPU9250Registers.FIFO_ALL_SENSORS)
+        count_buf = self.read_registers(MPU9250Registers.FIFO_COUNT, 2)
+        count = unpack(">h", count_buf)[0]
+        self.read_registers(MPU9250Registers.FIFO_READ, count)
 
     def get_fifo_data(self):
         count_buf = self.read_registers(MPU9250Registers.FIFO_COUNT, 2)
@@ -200,7 +217,10 @@ class MPU9255:
     def get_latest_sensor_data(self):
         # The registers for all sensors are adjacent to one another, and can be read in sequence
         buf = self.read_registers(MPU9250Registers.ACCEL_OUT, MPU9250Registers.FULL_OUT_SIZE)
-        # The magnetometer has different axes, this reorders and fixes them
-        acc_x, acc_y, acc_z, temp, gyro_x, gyro_y, gyro_z, mag_y, mag_x, mag_z = unpack(">hhhhhhhhhh", buf)
-        mag_z *= -1
-        return acc_x, acc_y, acc_z, temp, gyro_x, gyro_y, gyro_z, mag_x, mag_y, mag_z
+        if buf[20] == AK8963_DATA_OK:
+            # The magnetometer has different axes, this reorders and fixes them
+            acc_x, acc_y, acc_z, temp, gyro_x, gyro_y, gyro_z, mag_y, mag_x, mag_z = unpack(">hhhhhhhhhh", buf)
+            mag_z *= -1
+            return acc_x, acc_y, acc_z, temp, gyro_x, gyro_y, gyro_z, mag_x, mag_y, mag_z
+        else:
+            raise Exception("Data from magnetometer was not OK")

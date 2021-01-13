@@ -9,7 +9,7 @@ class MPU9250Registers:
     GYRO_OUT_SIZE = 6
     EXT_SENS_DATA_00 = 0x49
     MAG_OUT_SIZE = 7
-    FULL_OUT_SIZE = 6 + 2 + 6 + 6
+    FULL_OUT_SIZE = 6 + 2 + 6 + 7
     ACCEL_CONFIG = 0x1C
     ACCEL_FS_SEL_2G = 0x00
     ACCEL_FS_SEL_4G = 0x08
@@ -29,7 +29,10 @@ class MPU9250Registers:
     ACCEL_DLPF_10 = 0x05
     ACCEL_DLPF_5 = 0x06
     ACCEL_DLPF_OFF = 0x08
+
     CONFIG = 0x1A
+    CONFIG_FIFO_MODE_OVERWRITE = 0x00
+    CONFIG_FIFO_MODE_KEEP = 0x40
     GYRO_DLPF_184 = 0x01
     GYRO_DLPF_92 = 0x02
     GYRO_DLPF_41 = 0x03

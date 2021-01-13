@@ -1,21 +1,24 @@
 from machine import Pin, SPI
-from invensense.mpu9255 import MPU9255
+
+from devices import device_name_by_who_am_i
+from mpu9255 import MPU9255
 
 ONE_MHZ = 10000000
 SAMPLE_RATE_DIVIDER = 5
 
-sck_pin = Pin(14)
-mosi_pin = Pin(13)
-miso_pin = Pin(12)
+sck_pin = Pin(18)
+mosi_pin = Pin(23)
+miso_pin = Pin(19)
 
-cs_pin_num = 15
+cs_pin_num = 5
 cs_pin = Pin(cs_pin_num)
 cs_pin_mask = 1 << cs_pin_num
 
 hspi = SPI(1, ONE_MHZ, sck=sck_pin, mosi=mosi_pin, miso=miso_pin)
 mpu = MPU9255(spi=hspi, cs_pin=cs_pin)
 mpu.begin()
-print("Who Am I: ".format(mpu.who_am_i()))
+who_am_i = mpu.who_am_i()
+print("Who Am I: {} aka {}".format(who_am_i, device_name_by_who_am_i(who_am_i)))
 
 mpu.set_sample_rate_divider(SAMPLE_RATE_DIVIDER)
 mpu.enable_fifo()

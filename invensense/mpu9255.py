@@ -1,7 +1,10 @@
 from machine import Pin, SPI
+
+from devices import device_name_by_who_am_i
 from mpu9250_registers import MPU9250Registers
 from ustruct import unpack
 from utime import sleep_ms, sleep_us
+
 
 AK8963_DATA_OK = 0x10
 
@@ -9,7 +12,14 @@ WHOAMI_READ = 0x75 | 0x80
 SPI_READ = 0x80
 
 ACCEL_16G_SCALE = 16.0 / 32768.0
+TEMP_SCALE = 333.87
+TEMP_OFFSET_C = 21.0
 GYRO_2000DPS_SCALE = 2000.0 / 32768.0
+MAG_SCALE = 4912.0 / 32768.0
+
+
+class UnexpectedDataException(Exception):
+    pass
 
 
 class MPU9255:
@@ -18,6 +28,11 @@ class MPU9255:
     FIFO_SIZE = 21
 
     def __init__(self, spi: SPI, cs_pin: Pin):
+        self.gyro_scale = 2000.0 / 32768.0
+        self.accel_scale = 16.0 / 32768.0
+        self.mag_x_adj = MAG_SCALE
+        self.mag_y_adj = MAG_SCALE
+        self.mag_z_adj = MAG_SCALE
         self.spi = spi
         self.cs_pin = cs_pin
         self.cs_pin.init(mode=Pin.OUT)
@@ -47,23 +62,19 @@ class MPU9255:
         self.write_register(MPU9250Registers.PWR_MGMNT_1, MPU9250Registers.CLOCK_SEL_PLL)
 
         # Check whoami byte
-        whoami = self.who_am_i()
-        if whoami == 0x71:
-            print("Found MPU9250")
-        elif whoami == 0x73:
-            print("Found MPU9255")
+        device_model = self.device_model()
+        if device_model == "MPU9250" or device_model == "MPU9255":
+            print("Found {}".format(device_model))
         else:
-            if whoami == 0x70:
-                print("Found MPU6500 (WHO_AM_I register was 0x70)")
-            else:
-                print("Unknown device: {} {}".format(whoami, hex(whoami)))
+            whoami = self.who_am_i()
+            raise UnexpectedDataException("Unknown device, WHO_AM_I {} {}, Model: {}".format(whoami, hex(whoami), device_model))
 
         # Enable measurements on all axes
         self.write_register(MPU9250Registers.PWR_MGMNT_2, MPU9250Registers.ENABLE_ALL_AXES)
         # Set accelerometer range to 16G
         self.write_register(MPU9250Registers.ACCEL_CONFIG, MPU9250Registers.ACCEL_FS_SEL_16G)
         # Set gyro range to 2000 deg/s
-        self.write_register(MPU9250Registers.GYRO_CONFIG, MPU9250Registers.GYRO_FS_SEL_2000DPS)
+        self.set_gyro_range(2000)
         # 184Hz accelerometer DLPF
         self.write_register(MPU9250Registers.ACCEL_CONFIG2, MPU9250Registers.ACCEL_DLPF_184)
         # 184Hz gyro DLPF
@@ -79,10 +90,8 @@ class MPU9255:
         self.write_register(MPU9250Registers.I2C_MST_CTRL, MPU9250Registers.I2C_MST_CLK)
 
         who_is_ak = self.read_ak8963_register(MPU9250Registers.AK8963_WHO_AM_I)
-        if who_is_ak == 0x48:
-            print("Found AK8963")
-        else:
-            raise Exception("Unknown device found in place of AK8963: {}".format(who_is_ak))
+        if who_is_ak != 0x48:
+            raise UnexpectedDataException("Unknown device found in place of AK8963: WHO_AM_I {} {}".format(who_is_ak, hex(who_is_ak)))
 
         # Power down magnetometer
         self.write_ak8963_register(MPU9250Registers.AK8963_CNTL1, MPU9250Registers.AK8963_PWR_DOWN)
@@ -93,13 +102,13 @@ class MPU9255:
         # Read magnetometer axis scale adjustment registers and compute magnetometer scale factors
         axis_scale_adj_buf = self.read_ak8963_registers(MPU9250Registers.AK8963_ASA, 3)
         # print(axis_scale_adj_buf)
-        mag_x_adj = self.calc_mag_axis_scale_adj(axis_scale_adj_buf[0])
-        mag_y_adj = self.calc_mag_axis_scale_adj(axis_scale_adj_buf[1])
-        mag_z_adj = self.calc_mag_axis_scale_adj(axis_scale_adj_buf[2])
+        self.mag_x_adj = self.calc_mag_axis_scale_adj(axis_scale_adj_buf[0])
+        self.mag_y_adj = self.calc_mag_axis_scale_adj(axis_scale_adj_buf[1])
+        self.mag_z_adj = self.calc_mag_axis_scale_adj(axis_scale_adj_buf[2])
         # print("X: {}, Y: {}. Z: {}".format(mag_x_adj, mag_y_adj, mag_z_adj))
-        # # Power down magnetometer
-        # self.write_ak8963_register(MPU9250Registers.AK8963_CNTL1, MPU9250Registers.AK8963_PWR_DOWN)
-        # sleep_ms(100)  # Long wait for AK8963 mode changes
+        # Power down magnetometer
+        self.write_ak8963_register(MPU9250Registers.AK8963_CNTL1, MPU9250Registers.AK8963_PWR_DOWN)
+        sleep_ms(100)  # Long wait for AK8963 mode changes
         # Set magnetometer to 16 bit resolution, 100 Hz update rate
         self.write_ak8963_register(MPU9250Registers.AK8963_CNTL1, MPU9250Registers.AK8963_CNT_MEAS2)
         sleep_ms(100)  # Long wait for AK8963 mode changes
@@ -116,12 +125,16 @@ class MPU9255:
         self.setup_ak8963_slave()
         print(list(mag_buf))
 
+    def device_model(self):
+        return device_name_by_who_am_i(self.who_am_i())
+
     def set_sample_rate_divider(self, div_num):
         # Set sample rate divider to div_num
         self.write_register(MPU9250Registers.SMPDIV, div_num - 1)
 
     def calc_mag_axis_scale_adj(self, byte_val):
-        return (((float(byte_val) - 128.0) * 0.5) / 128.0) + 1.0
+        # See page 53 of the MPU-9255 register map
+        return MAG_SCALE * ((((float(byte_val) - 128.0) * 0.5) / 128.0) + 1.0)
 
     def write_register(self, sub_addr, byte_val):
         self.set_baudrate(baudrate=MPU9255.SPI_SLOW_CLOCK)
@@ -189,6 +202,32 @@ class MPU9255:
     def set_baudrate(self, baudrate):
         self.spi.init(baudrate=baudrate, polarity=0, phase=0)
 
+    def set_accel_range(self, g_max):
+        if g_max == 2:
+            self.write_register(MPU9250Registers.GYRO_CONFIG, MPU9250Registers.GYRO_FS_SEL_250DPS)
+        elif g_max == 4:
+            self.write_register(MPU9250Registers.GYRO_CONFIG, MPU9250Registers.GYRO_FS_SEL_500DPS)
+        elif g_max == 8:
+            self.write_register(MPU9250Registers.GYRO_CONFIG, MPU9250Registers.GYRO_FS_SEL_1000DPS)
+        elif g_max == 16:
+            self.write_register(MPU9250Registers.GYRO_CONFIG, MPU9250Registers.GYRO_FS_SEL_2000DPS)
+        else:
+            raise Exception("Invalid gyro range selection")
+        self.accel_scale = float(g_max) / 32768.0
+
+    def set_gyro_range(self, degrees_max):
+        if degrees_max == 250:
+            self.write_register(MPU9250Registers.GYRO_CONFIG, MPU9250Registers.GYRO_FS_SEL_250DPS)
+        elif degrees_max == 500:
+            self.write_register(MPU9250Registers.GYRO_CONFIG, MPU9250Registers.GYRO_FS_SEL_500DPS)
+        elif degrees_max == 1000:
+            self.write_register(MPU9250Registers.GYRO_CONFIG, MPU9250Registers.GYRO_FS_SEL_1000DPS)
+        elif degrees_max == 2000:
+            self.write_register(MPU9250Registers.GYRO_CONFIG, MPU9250Registers.GYRO_FS_SEL_2000DPS)
+        else:
+            raise Exception("Invalid gyro range selection")
+        self.gyro_scale = float(degrees_max) / 32768.0
+
     def who_am_i(self):
         return self.read_register(MPU9250Registers.WHO_AM_I)
 
@@ -214,7 +253,7 @@ class MPU9255:
         self.read_registers_into(MPU9250Registers.FIFO_READ, buf[0:count])
         return count
 
-    def get_latest_sensor_data(self):
+    def get_raw_sensor_data(self):
         # The registers for all sensors are adjacent to one another, and can be read in sequence
         buf = self.read_registers(MPU9250Registers.ACCEL_OUT, MPU9250Registers.FULL_OUT_SIZE)
         if buf[20] == AK8963_DATA_OK:
@@ -224,3 +263,23 @@ class MPU9255:
             return acc_x, acc_y, acc_z, temp, gyro_x, gyro_y, gyro_z, mag_x, mag_y, mag_z
         else:
             raise Exception("Data from magnetometer was not OK")
+
+    def raw_gyro_to_degrees(self, x, y, z):
+        return x * self.gyro_scale, y * self.gyro_scale, z * self.gyro_scale
+
+    def raw_accel_to_gs(self, x, y, z):
+        return x * self.accel_scale, y * self.accel_scale, z * self.accel_scale
+
+    def raw_temp_to_c(self, temp):
+        return (temp / TEMP_SCALE) + TEMP_OFFSET_C
+
+    def raw_mag_to_ut(self, x, y, z):
+        return x * self.mag_x_adj, y * self.mag_y_adj, z * self.mag_z_adj
+
+    def get_pretty_sensor_data(self):
+        acc_x, acc_y, acc_z, temp, gyro_x, gyro_y, gyro_z, mag_x, mag_y, mag_z = self.get_raw_sensor_data()
+        acc_x, acc_y, acc_z = self.raw_accel_to_gs(acc_x, acc_y, acc_z)
+        temp = self.raw_temp_to_c(temp)
+        gyro_x, gyro_y, gyro_z = self.raw_gyro_to_degrees(gyro_x, gyro_y, gyro_z)
+        mag_x, mag_y, mag_z = self.raw_mag_to_ut(mag_x, mag_y, mag_z)
+        return acc_x, acc_y, acc_z, temp, gyro_x, gyro_y, gyro_z, mag_x, mag_y, mag_z

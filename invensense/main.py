@@ -2,6 +2,7 @@ from machine import Pin, SPI
 
 from devices import device_name_by_who_am_i
 from mpu9255 import MPU9255
+from time import sleep_ms
 
 ONE_MHZ = 10000000
 SAMPLE_RATE_DIVIDER = 5
@@ -31,9 +32,17 @@ raw_y, raw_x, raw_z = mpu.read_ak8963_sensors()
 raw_z *= -1
 print("Magnetometer Readings (X,Y,Z) ({},{},{})".format(raw_x, raw_y, raw_z))
 
-acc_x, acc_y, acc_z, temp, gyro_x, gyro_y, gyro_z, mag_x, mag_y, mag_z = mpu.get_latest_sensor_data()
-print(
-    "Readings (X,Y,Z) Accelerometer: ({},{},{}), Temp: {}, Gyroscope: ({},{},{}), Magnetometer: ({},{},{})".format(
-        acc_x, acc_y, acc_z, temp, gyro_x, gyro_y, gyro_z, mag_x, mag_y, mag_z
+
+def pretty_print_sensors():
+    acc_x, acc_y, acc_z, temp, gyro_x, gyro_y, gyro_z, mag_x, mag_y, mag_z = mpu.get_pretty_sensor_data()
+    print(
+        "Readings (X,Y,Z) Accelerometer (g): ({},{},{}), Temp (C): {}, Gyroscope (deg/s): ({},{},{}), Magnetometer (uT): ({},{},{})".format(
+            acc_x, acc_y, acc_z, temp, gyro_x, gyro_y, gyro_z, mag_x, mag_y, mag_z
+        )
     )
-)
+
+
+def loop_pretty_sensors():
+    while True:
+        sleep_ms(100)
+        pretty_print_sensors()
